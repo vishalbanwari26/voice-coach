@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1115">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Voice Coach">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
+<title>Voice Coach</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>Voice Coach</h1>
+  <nav class="tabs" role="tablist">
+    <button data-mode="interview" role="tab">Interview</button>
+    <button data-mode="tutor" role="tab">German</button>
+  </nav>
+</header>
+
+<main>
+  <div id="warn" class="warn" hidden></div>
+
+  <details id="settings" class="card">
+    <summary>Settings</summary>
+    <div class="grid">
+      <label class="wide">Gemini API key (the live voice) <input id="k-gemini" type="password" autocomplete="off" placeholder="AIza..."></label>
+      <label class="wide">Groq API key (reports and Whisper) <input id="k-groq" type="password" autocomplete="off" placeholder="gsk_..."></label>
+      <label>Your name <input id="me-name" placeholder="for the tutor to use"></label>
+      <label>About you (for the tutor) <input id="me-about" placeholder="where you live, your job, your goals"></label>
+      <label>Live model <input id="m-live" placeholder="models/gemini-3.8-live"></label>
+      <label>Report model <input id="m-report" placeholder="openai/gpt-oss-120b"></label>
+    </div>
+    <label class="check"><input type="checkbox" id="use-whisper" checked> Accurate transcript with Whisper (better reports and filler counts)</label>
+    <p class="muted">Keys are stored only in this browser on this device and are sent only to Google and Groq.</p>
+    <button id="save-settings">Save</button>
+  </details>
+
+  <section id="setup" class="card">
+    <form id="form-interview" class="grid" data-for="interview">
+      <label>Round
+        <select name="round">
+          <option value="recruiter">Recruiter / TA screen</option>
+          <option value="hiring_manager">Hiring manager</option>
+          <option value="technical">Technical deep dive</option>
+          <option value="ai_technical">AI / ML technical</option>
+          <option value="system_design">System design</option>
+          <option value="behavioral">Behavioural</option>
+          <option value="coding_verbal">Coding (verbal)</option>
+          <option value="founder">Founder / CEO</option>
+        </select>
+      </label>
+      <label>Difficulty
+        <select name="difficulty">
+          <option value="friendly">Friendly</option>
+          <option value="standard" selected>Standard</option>
+          <option value="tough">Tough</option>
+        </select>
+      </label>
+      <label>Company <input name="company" placeholder="e.g. Bliro"></label>
+      <label>Role <input name="role" placeholder="e.g. Senior AI Engineer, Agents"></label>
+      <label>Interviewer name <input name="interviewer_name" placeholder="Alex"></label>
+      <label>Minutes <input name="minutes" type="number" min="5" max="90" value="30"></label>
+      <label>Voice <select name="voice" class="voices"></select></label>
+      <label>Pause before it replies <select name="silence_ms">
+          <option value="800">0.8 s (snappy)</option>
+          <option value="1200" selected>1.2 s</option>
+          <option value="2000">2 s (I think while talking)</option>
+          <option value="3000">3 s</option>
+        </select></label>
+      <label class="wide">Job description <textarea name="jd" rows="4" placeholder="Paste the posting (optional but makes it much better)"></textarea></label>
+      <label class="wide">CV (kept on this phone, reused next time)
+        <textarea name="cv" rows="4" placeholder="Paste your CV text once"></textarea>
+      </label>
+    </form>
+
+    <form id="form-tutor" class="grid" data-for="tutor" hidden>
+      <label>Level
+        <select name="level">
+          <option>A1</option><option selected>A2</option><option>B1</option><option>B2</option>
+        </select>
+      </label>
+      <label>Situation
+        <select name="scenario">
+          <option value="free">Free conversation</option>
+          <option value="intro">Introducing yourself</option>
+          <option value="work_smalltalk">Small talk at work</option>
+          <option value="tech_talk">Explaining my projects</option>
+          <option value="job_interview">Job interview in German</option>
+          <option value="buergeramt">Bürgeramt (registration)</option>
+          <option value="doctor">At the doctor</option>
+          <option value="landlord">Call with the landlord</option>
+          <option value="shopping">Shop / restaurant</option>
+        </select>
+      </label>
+      <label>Corrections
+        <select name="correction">
+          <option value="each_turn">Right away, after each answer</option>
+          <option value="end">Only in the report at the end</option>
+        </select>
+      </label>
+      <label>Minutes <input name="minutes" type="number" min="5" max="60" value="15"></label>
+      <label>Voice <select name="voice" class="voices"></select></label>
+      <label>Pause before it replies <select name="silence_ms">
+          <option value="1000">1 s</option>
+          <option value="1500" selected>1.5 s</option>
+          <option value="2500">2.5 s (I need time to think)</option>
+        </select></label>
+      <div class="wide" id="recurring"></div>
+    </form>
+
+    <label class="check"><input type="checkbox" id="speaker-mode"> Speaker mode: no headphones, so mute my mic while it talks (you can't interrupt)</label>
+    <button id="start" class="primary">Start</button>
+  </section>
+
+  <section id="live" class="card" hidden>
+    <div class="live-head">
+      <span id="status" class="pill">connecting</span>
+      <span id="clock">00:00</span>
+    </div>
+    <div class="meter"><div id="level"></div></div>
+    <div id="transcript" aria-live="polite"></div>
+    <div class="row">
+      <button id="mute">Mute mic</button>
+      <button id="end" class="danger">End and get report</button>
+    </div>
+  </section>
+
+  <section id="report" class="card" hidden></section>
+
+  <details id="history" class="card">
+    <summary>Past sessions</summary>
+    <div id="history-list"></div>
+  </details>
+</main>
+
+<script src="prompts.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
