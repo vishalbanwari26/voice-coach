@@ -6,7 +6,10 @@ talking while you speak, stop and listen; do not repeat what you already said
 unless they ask. Pauses are normal: if they pause mid-answer, wait instead of
 jumping in. Messages in square brackets starting with SYSTEM are notes from the
 app (for example about time). Follow them, never read them aloud and never
-mention them.`;
+mention them. The other person is not a native speaker and has an Indian
+accent, and what they say may reach you as a transcript. If a word looks
+wrong, assume the closest sensible meaning; if you really cannot tell what
+they meant, ask them briefly to repeat it instead of guessing.`;
 
 const ROUNDS = {
   recruiter: ["Talent acquisition / recruiter screen",

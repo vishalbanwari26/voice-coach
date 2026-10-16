@@ -13,7 +13,8 @@ const store = {
 
 const LIVE_URL = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
 const GROQ = "https://api.groq.com/openai/v1";
-const DEFAULTS = { live: "models/gemini-3.8-live", report: "openai/gpt-oss-120b", whisper: "whisper-large-v3-turbo" };
+const DEFAULTS = { live: "models/gemini-3.8-live", report: "openai/gpt-oss-120b", whisper: "whisper-large-v3-turbo",
+  listen: "whisper-large-v3" }; // the full model is slower but much better with accents
 const VOICES = ["Charon", "Kore", "Puck", "Fenrir", "Aoede", "Leda", "Orus", "Zephyr"];
 const DEFAULT_VOICE = { interview: "Charon", tutor: "Kore" };
 const FILLERS = {
@@ -40,12 +41,13 @@ function loadSettings() {
   $("#k-gemini").value = s.gemini || ""; $("#k-groq").value = s.groq || "";
   $("#m-live").value = s.live || ""; $("#m-report").value = s.report || "";
   $("#use-whisper").checked = s.whisper !== false;
+  $("#listen").value = s.listen || "whisper";
   $("#me-name").value = s.name || ""; $("#me-about").value = s.about || "";
   if (!s.gemini) $("#settings").open = true;
 }
 function saveSettings() {
   store.set("settings", { gemini: $("#k-gemini").value.trim(), groq: $("#k-groq").value.trim(),
-    live: $("#m-live").value.trim(), report: $("#m-report").value.trim(), whisper: $("#use-whisper").checked,
+    live: $("#m-live").value.trim(), report: $("#m-report").value.trim(), whisper: $("#use-whisper").checked, listen: $("#listen").value,
     name: $("#me-name").value.trim(), about: $("#me-about").value.trim() });
   $("#settings").open = false; checkSetup();
 }
@@ -147,6 +149,7 @@ async function startAudio() {
     $("#level").style.width = `${Math.min(100, data.rms * 400)}%`;
     if (S.muted || !S.kicked) return;
     if (S.speakerMode && S.sources.size) return; // no headphones: keep the AI from hearing itself
+    if (whisperListens()) return vad(data);
     S.turnAudio.push(data.pcm);
     if (S.ws?.readyState === 1)
       S.ws.send(JSON.stringify({ realtimeInput: { audio: { data: b64(data.pcm), mimeType: "audio/pcm;rate=16000" } } }));
@@ -210,7 +213,7 @@ function connect() {
     generationConfig: { responseModalities: ["AUDIO"],
       speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: cfg.voice || DEFAULT_VOICE[mode] } } } },
     systemInstruction: { parts: [{ text: systemPrompt(cfg) }] },
-    inputAudioTranscription: {}, outputAudioTranscription: {},
+    ...(whisperListens() ? {} : { inputAudioTranscription: {} }), outputAudioTranscription: {},
     realtimeInputConfig: { automaticActivityDetection: { silenceDurationMs: cfg.silence_ms } },
     contextWindowCompression: { slidingWindow: {} },
     sessionResumption: S.handle ? { handle: S.handle } : {},
@@ -236,9 +239,13 @@ function onMessage(m) {
   if (!sc) return;
   if (sc.inputTranscription?.text) userSaid(sc.inputTranscription.text);
   if (sc.outputTranscription?.text) aiSaid(sc.outputTranscription.text);
-  for (const p of sc.modelTurn?.parts || []) if (p.inlineData?.data) { closeUser(); play(p.inlineData.data); }
-  if (sc.interrupted) { stopPlayback(); closeAi(true); setStatus("listening"); }
-  if (sc.turnComplete) { closeAi(false); flushNote(); }
+  for (const p of sc.modelTurn?.parts || []) if (p.inlineData?.data) {
+    S.generating = true;
+    if (S.dropAudio) continue; // the rest of an answer you already talked over
+    closeUser(); play(p.inlineData.data);
+  }
+  if (sc.interrupted) { S.generating = false; S.dropAudio = false; stopPlayback(); closeAi(true); setStatus("listening"); }
+  if (sc.turnComplete) { S.generating = false; S.dropAudio = false; closeAi(false); flushNote(); }
 }
 function send(obj) { if (S.ws?.readyState === 1) S.ws.send(JSON.stringify(obj)); }
 
@@ -295,25 +302,76 @@ function closeAi(interrupted) {
   if (!interrupted) S.turnAudio = [];
 }
 async function whisperTurn(turn, chunks) {
-  try {
-    const fd = new FormData();
-    fd.append("file", wav(chunks), "answer.wav");
-    fd.append("model", DEFAULTS.whisper);
-    fd.append("language", mode === "tutor" ? "de" : "en");
-    fd.append("response_format", "verbose_json");
-    fd.append("temperature", "0");
-    fd.append("prompt", WHISPER_PROMPT[mode]);
-    const r = await fetch(`${GROQ}/audio/transcriptions`, { method: "POST", headers: { Authorization: `Bearer ${settings().groq}` }, body: fd });
-    if (!r.ok) return;
-    const d = await r.json();
-    const segs = (d.segments || []).filter(s => (s.no_speech_prob ?? 0) < 0.6);
-    const text = segs.map(s => s.text).join(" ").replace(/\s+/g, " ").trim();
-    if (!text || WHISPER_JUNK.has(text.toLowerCase().replace(/[.!?]/g, "").trim()) || text === WHISPER_PROMPT[mode]) return;
-    const spoken = segs.reduce((a, s) => a + (s.end - s.start), 0);
-    turn.live = turn.text; turn.text = text; turn.whisper = true;
-    turn.metrics = metricsFor(text, spoken || turn.metrics.seconds);
-    render(turn);
-  } catch {}
+  const r = await transcribe(chunks, DEFAULTS.whisper).catch(() => null);
+  if (!r) return;
+  turn.live = turn.text; turn.text = r.text; turn.whisper = true;
+  turn.metrics = metricsFor(r.text, r.spoken || turn.metrics.seconds);
+  render(turn);
+}
+
+// ---------- Whisper listens (better with accents) ----------
+// The phone detects when you speak, Whisper large-v3 transcribes the clip, and
+// Gemini gets the text. Gemini still speaks, and talking over it still stops it.
+const whisperListens = () => settings().listen !== "gemini" && !!settings().groq;
+function vadReset() { S.vad = { speaking: false, voiced: 0, silentMs: 0, buf: [], pre: [], floor: 0.006 }; }
+function vad({ pcm, rms }) {
+  const v = S.vad, thr = Math.max(0.012, v.floor * 3);
+  if (!v.speaking) {
+    v.pre.push(pcm); if (v.pre.length > 3) v.pre.shift();      // keep 0.3 s before speech starts
+    if (rms > thr) v.voiced++; else { v.voiced = 0; v.floor = 0.95 * v.floor + 0.05 * rms; }
+    if (v.voiced >= 2) {                                          // 0.2 s above the noise floor
+      v.speaking = true; v.buf = [...v.pre]; v.silentMs = 0;
+      if (S.sources.size || S.generating) bargeIn();
+      setStatus("hearing");
+    }
+    return;
+  }
+  v.buf.push(pcm);
+  v.silentMs = rms > thr ? 0 : v.silentMs + 100;
+  const long = v.buf.length >= 600;                               // cap one answer at 60 s
+  if (v.silentMs >= S.cfg.silence_ms || long) {
+    const chunks = v.buf, ms = chunks.length * 100 - v.silentMs; // each chunk is 0.1 s of audio
+    v.speaking = false; v.voiced = 0; v.buf = []; v.pre = [];
+    setStatus("listening");
+    if (ms >= 400) heard(chunks, ms);
+  }
+}
+function bargeIn() {
+  stopPlayback(); closeAi(true);
+  S.dropAudio = S.generating; // ignore what is still on its way for the old answer
+}
+async function heard(chunks, ms) {
+  const turn = addTurn("user"); turn.text = "…"; render(turn);
+  S.pendingTurns++;
+  const r = await transcribe(chunks, DEFAULTS.listen).catch(() => null);
+  S.pendingTurns--;
+  if (!r?.text) { turn.el.remove(); S.transcript.splice(S.transcript.indexOf(turn), 1); return; }
+  turn.text = r.text; turn.whisper = true;
+  turn.metrics = metricsFor(r.text, r.spoken || ms / 1000);
+  render(turn); S.lastUser = turn;
+  if (S.sources.size || S.generating) bargeIn();
+  send({ realtimeInput: { text: r.text } });
+}
+async function transcribe(chunks, model) {
+  const s = settings(), fd = new FormData();
+  fd.append("file", wav(chunks), "speech.wav");
+  fd.append("model", model);
+  fd.append("language", mode === "tutor" ? "de" : "en");
+  fd.append("response_format", "verbose_json");
+  fd.append("temperature", "0");
+  fd.append("prompt", whisperPrompt());
+  const r = await fetch(`${GROQ}/audio/transcriptions`, { method: "POST", headers: { Authorization: `Bearer ${s.groq}` }, body: fd });
+  if (!r.ok) return null;
+  const d = await r.json();
+  const segs = (d.segments || []).filter(x => (x.no_speech_prob ?? 0) < 0.6);
+  const text = segs.map(x => x.text).join(" ").replace(/\s+/g, " ").trim();
+  if (!text || WHISPER_JUNK.has(text.toLowerCase().replace(/[.!?]/g, "").trim()) || text === whisperPrompt()) return null;
+  return { text, spoken: segs.reduce((a, x) => a + (x.end - x.start), 0) };
+}
+// Whisper uses the prompt as context: words it should expect, and the style to keep (fillers).
+function whisperPrompt() {
+  const about = (settings().about || "").slice(0, 200);
+  return `${about ? about + ". " : ""}${WHISPER_PROMPT[mode]}`;
 }
 
 // ---------- time ----------
@@ -328,7 +386,7 @@ function startClock() {
   }, 500);
 }
 function flushNote() {
-  if (!S.pendingNote || S.sources.size || S.ai) return;
+  if (!S.pendingNote || S.sources.size || S.ai || S.vad?.speaking || S.pendingTurns) return;
   send({ realtimeInput: { text: S.pendingNote } });
   S.pendingNote = null;
 }
@@ -339,7 +397,9 @@ async function start() {
   S.cfg = readConfig(); store.set(`cfg-${mode}`, Object.fromEntries(new FormData(form()).entries()));
   S.speakerMode = $("#speaker-mode").checked; store.set("speakerMode", S.speakerMode);
   Object.assign(S, { running: true, ending: false, handle: null, kicked: false, transcript: [], user: null, ai: null,
-    lastUser: null, turnAudio: [], whisperJobs: [], notes: { soon: false, up: false }, pendingNote: null, muted: false });
+    lastUser: null, turnAudio: [], whisperJobs: [], notes: { soon: false, up: false }, pendingNote: null, muted: false,
+    generating: false, dropAudio: false, pendingTurns: 0 });
+  vadReset();
   $("#transcript").innerHTML = ""; $("#report").hidden = true; $("#setup").hidden = true;
   $("#settings").hidden = true; $("#history").hidden = true; $("#live").hidden = false;
   $("#mute").textContent = "Mute mic"; $("#clock").textContent = "00:00";
@@ -402,7 +462,7 @@ function fail(msg) {
 function setStatus(s) {
   const el = $("#status");
   el.className = `pill ${s}`;
-  el.textContent = { connecting: "connecting", listening: "listening",
+  el.textContent = { connecting: "connecting", listening: "listening", hearing: "hearing you",
     speaking: S.speakerMode ? "speaking" : "speaking · talk to interrupt", reconnecting: "reconnecting", ended: "ended" }[s] || s;
 }
 function showWarn(msg) { const w = $("#warn"); w.textContent = msg || ""; w.hidden = !msg; }

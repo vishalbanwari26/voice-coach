@@ -35,7 +35,13 @@
       <label>Live model <input id="m-live" placeholder="models/gemini-3.8-live"></label>
       <label>Report model <input id="m-report" placeholder="openai/gpt-oss-120b"></label>
     </div>
-    <label class="check"><input type="checkbox" id="use-whisper" checked> Accurate transcript with Whisper (better reports and filler counts)</label>
+    <label class="wide-label">Who listens to you
+      <select id="listen">
+        <option value="whisper">Whisper (best with accents, ~1 s slower)</option>
+        <option value="gemini">Gemini (fastest, weaker with accents)</option>
+      </select>
+    </label>
+    <label class="check"><input type="checkbox" id="use-whisper" checked> Gemini mode only: also send each answer to Whisper for a better transcript</label>
     <p class="muted">Keys are stored only in this browser on this device and are sent only to Google and Groq.</p>
     <button id="save-settings">Save</button>
   </details>

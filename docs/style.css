@@ -68,3 +68,5 @@ details.card[open] > summary { margin-bottom: 12px; }
 .hist { display: block; width: 100%; text-align: left; margin-bottom: 6px; font-size: 14px; }
 #save-settings { margin-top: 8px; }
 pre { white-space: pre-wrap; }
+.pill.hearing { background: #3a1f3f; color: #e08ef0; }
+.wide-label { margin-top: 12px; }
